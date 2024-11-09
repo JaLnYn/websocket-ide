@@ -52,6 +52,7 @@ cargo run -- --workspace /your/code/path
 ## Todo
 
 - [ ] Debugger support
+- [ ] Search
 - [ ] More LSP features
 - [ ] Testing
 - [ ] Documentation improvements
@@ -68,10 +69,6 @@ I'm actively working on this project and welcome any contributions! Feel free to
 - Improving docs
 - Making the code prettier
 - Adding cool stuff we haven't thought of
-
-## License
-
-Coming soon! (MIT probably)
 
 ---
 
