@@ -18,6 +18,28 @@ An example browser IDE is right here: [🍌 JaLnYn/browser-ide](https://github.c
 cargo run -- --workspace /your/code/path
 ```
 
+### Test front-end
+```
+# clone the frontend test
+git clone https://github.com/JaLnYn/browser-ide
+cd browser-ide
+
+# install dependencies and run front end
+npm i
+npm run dev
+```
+
+<img width="1488" alt="image" src="https://github.com/user-attachments/assets/26a01a96-0d15-4d61-8799-12e0e0254663">
+
+
+Note: if you want to test the lsp, you have to install rust-analyzer. Instructions [HERE](https://rust-analyzer.github.io/manual.html#rust-analyzer-language-server-binary)
+```
+# snippet from the site
+
+mkdir -p ~/.local/bin
+curl -L https://github.com/rust-lang/rust-analyzer/releases/latest/download/rust-analyzer-x86_64-unknown-linux-gnu.gz | gunzip -c - > ~/.local/bin/rust-analyzer
+chmod +x ~/.local/bin/rust-analyzer
+```
 ## WebSocket API
 
 ### Client Messages
@@ -58,6 +80,7 @@ cargo run -- --workspace /your/code/path
 - [ ] Documentation improvements
 - [ ] Better error handling
 - [ ] Multi-root workspace support
+- [ ] Websocket based terminal
 
 ## Contributing
 
