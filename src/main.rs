@@ -2,6 +2,8 @@
 mod server;
 mod file_system;
 mod lsp;
+mod utils;
+mod terminal;
 
 use anyhow::Result;
 use clap::Parser;
