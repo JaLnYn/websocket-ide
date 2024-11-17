@@ -8,7 +8,8 @@ use crate::terminal::types::{TerminalMessage, TerminalSize};
 
 pub struct TerminalServer {
     id: String,
-    pty_pair: Arc<Mutex<PtyPair>>,
+    pty_pair: Arc<Mutex<Option<PtyPair>>>,
+    writer: Arc<Mutex<Option<Box<dyn Write + Send>>>>,
     event_sender: broadcast::Sender<TerminalMessage>,
 }
 
@@ -27,6 +28,9 @@ impl TerminalServer {
             pixel_height: 0,
         })?;
 
+        // Take the writer immediately
+        let writer = pty_pair.master.take_writer()?;
+
         let shell_cmd = if cfg!(windows) {
             std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string())
         } else {
@@ -43,7 +47,8 @@ impl TerminalServer {
 
         Ok(Self {
             id,
-            pty_pair: Arc::new(Mutex::new(pty_pair)),
+            pty_pair: Arc::new(Mutex::new(Some(pty_pair))),
+            writer: Arc::new(Mutex::new(Some(writer))),
             event_sender,
         })
     }
@@ -54,7 +59,8 @@ impl TerminalServer {
         let event_sender = self.event_sender.clone();
 
         let mut reader = {
-            let pair = pty_pair.lock().await;
+            let mut pair_guard = pty_pair.lock().await;
+            let pair = pair_guard.as_mut().ok_or_else(|| anyhow::anyhow!("PTY pair not available"))?;
             pair.master.try_clone_reader()?
         };
 
@@ -67,7 +73,6 @@ impl TerminalServer {
                             terminal_id: id.clone(),
                             data: buffer[..n].to_vec(),
                         };
-                        // Using blocking_send since we're in a blocking task
                         if event_sender.send(msg).is_err() { break; }
                     }
                     Ok(_) => break,  // EOF
@@ -87,22 +92,39 @@ impl TerminalServer {
     }
 
     pub async fn write(&self, data: &[u8]) -> Result<()> {
-        let pair = self.pty_pair.lock().await;
-        let mut writer = pair.master.take_writer()?;
-        writer.write_all(data)?;
-        writer.flush()?;
-        Ok(())
+        let mut writer_guard = self.writer.lock().await;
+        if let Some(writer) = writer_guard.as_mut() {
+            writer.write_all(data)?;
+            writer.flush()?;
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("Terminal writer not available"))
+        }
     }
 
     pub async fn resize(&self, size: TerminalSize) -> Result<()> {
-        let pair = self.pty_pair.lock().await;
-        pair.master.resize(PtySize {
-            rows: size.rows,
-            cols: size.cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        })?;
-        Ok(())
+        let mut pair_guard = self.pty_pair.lock().await;
+        if let Some(pair) = pair_guard.as_mut() {
+            pair.master.resize(PtySize {
+                rows: size.rows,
+                cols: size.cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })?;
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("Terminal not available"))
+        }
+    }
+}
+
+impl Drop for TerminalServer {
+    fn drop(&mut self) {
+        // Clean up resources when the terminal is dropped
+        // This is best-effort cleanup, so we ignore any errors
+        let _ = std::thread::scope(|_| {
+            // The writer and pty_pair will be dropped automatically
+        });
     }
 }
 
