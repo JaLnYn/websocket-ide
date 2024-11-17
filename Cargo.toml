@@ -19,3 +19,6 @@ clap = { version = "4.2", features = ["derive"] }
 futures = "0.3.31"
 similar = "2.4.0"  
 url = "2.4"
+tempfile = "3.14.0"
+portable-pty = "0.8.1"
+uuid = { version = "1.11.0", features = ["v4"] }
