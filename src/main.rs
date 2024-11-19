@@ -4,6 +4,7 @@ mod file_system;
 mod lsp;
 mod utils;
 mod terminal;
+mod search;
 
 use anyhow::Result;
 use clap::Parser;

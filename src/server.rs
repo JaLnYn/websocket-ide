@@ -16,7 +16,7 @@ use std::{path::PathBuf, time::Duration};
 use anyhow::Result;
 use std::sync::Arc;
 
-use crate::file_system::{DocumentMetadata, DiffChange};
+use crate::{file_system::{DiffChange, DocumentMetadata}, search::{SearchManager, SearchOptions}};
 use crate::lsp::{types::LspConfiguration, lsp_manager::LspManager};
 
 use crate::file_system::{FileSystem, FileNode, FileEvent, VersionedDocument};
@@ -26,6 +26,8 @@ use crate::terminal::{
     types::{TerminalMessage, TerminalSize},
     terminal_manager::TerminalManager,
 };
+
+use crate::search::{SearchStatus, SearchResult, ActiveSearch};
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content")]
@@ -71,11 +73,16 @@ pub enum ClientMessage {
     CloseTerminal {
         id: String,
     },
+    Search {
+        query: String,
+        case_sensitive: bool,
+    },
+    CancelSearch,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content")]
-enum ServerMessage {
+pub enum ServerMessage {
     Success {},
     DirectoryContent { path: PathBuf, content: Vec<FileNode> },
     FileSystemEvents { events: Vec<FileEvent> },
@@ -123,6 +130,12 @@ enum ServerMessage {
         terminal_id: String,
         error: String,
     },
+    SearchStatus {
+        status: SearchStatus,
+    },
+    SearchResult {
+        result: SearchResult,
+    },
 }
 
 pub struct Server {
@@ -130,6 +143,7 @@ pub struct Server {
     file_system: Arc<FileSystem>,
     lsp_manager: Arc<LspManager>,
     terminal_manager: Arc<TerminalManager>,
+    search_manager: Arc<SearchManager>,
 }
 
 
@@ -154,12 +168,15 @@ impl Server {
         
         let lsp_manager = Arc::new(LspManager::new(new_path, lsp_configs));
         let terminal_manager = Arc::new(TerminalManager::new());
+        let search_manager = Arc::new(SearchManager::new(workspace_path.clone()));
+
 
         Ok(Self {
             port,
             file_system,
             lsp_manager,
             terminal_manager,
+            search_manager
         })
     }
 
@@ -498,6 +515,18 @@ impl Server {
                     },
                 }
             },
+            ClientMessage::Search { query, case_sensitive } => {
+                match self.search_manager.start_search(query, case_sensitive).await {
+                    Ok(_) => ServerMessage::Success {},
+                    Err(e) => ServerMessage::Error {
+                        message: format!("Search failed: {}", e)
+                    }
+                }
+            },
+            ClientMessage::CancelSearch => {
+                self.search_manager.cancel_search().await;
+                ServerMessage::Success {}
+            }, 
         };
 
         if matches!(response, ServerMessage::Success {}) {
@@ -518,6 +547,8 @@ impl Server {
         
         let mut fs_events = self.file_system.subscribe();
         let mut terminal_events = self.terminal_manager.subscribe();
+        let mut search_events = self.search_manager.subscribe();
+
         
         // Buffer for collecting events
         let mut event_buffer = Vec::with_capacity(100);
@@ -591,6 +622,13 @@ impl Server {
                         }
                     }
                 }
+                Ok(search_result) = search_events.recv() => {
+                    if let Ok(message) = serde_json::to_string(&ServerMessage::SearchResult { 
+                        result: search_result 
+                    }) {
+                        write.send(Message::Text(message)).await?;
+                    }
+                }
             }
         }
     }
@@ -632,6 +670,7 @@ impl Clone for Server {
             file_system: Arc::clone(&self.file_system),
             lsp_manager: Arc::clone(&self.lsp_manager),
             terminal_manager: Arc::clone(&self.terminal_manager),
+            search_manager: Arc::clone(&self.search_manager),
         }
     }
 }
