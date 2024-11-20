@@ -24,7 +24,35 @@ pub enum SearchStatus {
     Error { message: String },
 }
 
-pub struct ActiveSearch {
+struct ActiveSearch {
     receiver: mpsc::Receiver<ServerMessage>,
     _task: tokio::task::JoinHandle<()>,
+}
+
+
+#[derive(Clone)]
+pub struct SearchItem {
+    pub path: String,
+    pub line_number: u32,
+    pub content: String,
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct SearchResultItem {
+    pub path: String,
+    pub line_number: u32,
+    pub content: String,
+}
+
+#[derive(Clone)]
+pub enum SearchMessage {
+    Results {
+        search_id: String,
+        items: Vec<SearchResultItem>, // Vec of matching results
+        is_complete: bool,  // indicates if this is the final batch
+    },
+    Error {
+        search_id: String,
+        error: String,
+    },
 }

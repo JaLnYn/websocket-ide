@@ -22,3 +22,5 @@ url = "2.4"
 tempfile = "3.14.0"
 portable-pty = "0.8.1"
 uuid = { version = "1.11.0", features = ["v4"] }
+nucleo = "0.5"
+walkdir = "2.4"

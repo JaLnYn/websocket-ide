@@ -16,7 +16,7 @@ use std::{path::PathBuf, time::Duration};
 use anyhow::Result;
 use std::sync::Arc;
 
-use crate::{file_system::{DiffChange, DocumentMetadata}, search::{SearchManager, SearchOptions}};
+use crate::{file_system::{DiffChange, DocumentMetadata}, search::{SearchManager, SearchOptions, SearchResultItem}};
 use crate::lsp::{types::LspConfiguration, lsp_manager::LspManager};
 
 use crate::file_system::{FileSystem, FileNode, FileEvent, VersionedDocument};
@@ -27,7 +27,7 @@ use crate::terminal::{
     terminal_manager::TerminalManager,
 };
 
-use crate::search::{SearchStatus, SearchResult, ActiveSearch};
+use crate::search::{SearchMessage, SearchStatus};
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content")]
@@ -74,10 +74,13 @@ pub enum ClientMessage {
         id: String,
     },
     Search {
+        id: String,
         query: String,
-        case_sensitive: bool,
+        search_filename_only: bool,
     },
-    CancelSearch,
+    CancelSearch{
+        id: String,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -133,8 +136,10 @@ pub enum ServerMessage {
     SearchStatus {
         status: SearchStatus,
     },
-    SearchResult {
-        result: SearchResult,
+    SearchResults {
+        search_id: String,
+        items: Vec<SearchResultItem>,
+        is_complete: bool,
     },
 }
 
@@ -515,16 +520,16 @@ impl Server {
                     },
                 }
             },
-            ClientMessage::Search { query, case_sensitive } => {
-                match self.search_manager.start_search(query, case_sensitive).await {
+            ClientMessage::Search { id, query, search_filename_only } => {
+                match self.search_manager.create_search(&query, Some(id), search_filename_only).await {
                     Ok(_) => ServerMessage::Success {},
                     Err(e) => ServerMessage::Error {
                         message: format!("Search failed: {}", e)
                     }
                 }
             },
-            ClientMessage::CancelSearch => {
-                self.search_manager.cancel_search().await;
+            ClientMessage::CancelSearch {id} => {
+                self.search_manager.close_search(id).await;
                 ServerMessage::Success {}
             }, 
         };
@@ -622,11 +627,26 @@ impl Server {
                         }
                     }
                 }
-                Ok(search_result) = search_events.recv() => {
-                    if let Ok(message) = serde_json::to_string(&ServerMessage::SearchResult { 
-                        result: search_result 
-                    }) {
-                        write.send(Message::Text(message)).await?;
+                Ok(search_msg) = search_events.recv() => {
+                    match search_msg {
+                        SearchMessage::Results { search_id, items, is_complete } => {
+                            let message = ServerMessage::SearchResults { 
+                                search_id,
+                                items,
+                                is_complete
+                            };
+                            if let Ok(json) = serde_json::to_string(&message) {
+                                write.send(Message::Text(json)).await?;
+                            }
+                        },
+                        SearchMessage::Error { search_id, error } => {
+                            let message = ServerMessage::Error { 
+                                message: format!("Search error ({}): {}", search_id, error)
+                            };
+                            if let Ok(json) = serde_json::to_string(&message) {
+                                write.send(Message::Text(json)).await?;
+                            }
+                        }
                     }
                 }
             }
