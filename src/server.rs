@@ -74,12 +74,10 @@ pub enum ClientMessage {
         id: String,
     },
     Search {
-        id: String,
         query: String,
         search_filename_only: bool,
     },
     CancelSearch{
-        id: String,
     },
 }
 
@@ -520,15 +518,15 @@ impl Server {
                     },
                 }
             },
-            ClientMessage::Search { id, query, search_filename_only } => {
-                match self.search_manager.create_search(&query, search_filename_only).await {
-                    Ok(_) => ServerMessage::Success {},
+            ClientMessage::Search { query, search_filename_only } => {
+                match self.search_manager.clone().create_search(query, search_filename_only).await {
+                    Ok(_) => ServerMessage::Success { },
                     Err(e) => ServerMessage::Error {
                         message: format!("Search failed: {}", e)
                     }
                 }
             },
-            ClientMessage::CancelSearch {id} => {
+            ClientMessage::CancelSearch {} => {
                 self.search_manager.close_search().await;
                 ServerMessage::Success {}
             }, 
@@ -539,7 +537,7 @@ impl Server {
         }
 
         let message = serde_json::to_string(&response)?;
-        println!("Sending message: {}", message);
+        // println!("Sending message: {}", message);
         write.send(Message::Text(message)).await?;
         Ok(())
     }
