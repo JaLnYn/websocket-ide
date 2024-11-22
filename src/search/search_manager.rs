@@ -1,219 +1,265 @@
 // src/search/search_manager.rs
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
-use tokio::sync::{broadcast, mpsc, RwLock};
-use nucleo::{pattern::{CaseMatching, Normalization}, Config, Nucleo};
-use anyhow::{Result, anyhow};
-use tokio::fs;
-use walkdir::WalkDir;
-use serde::{Serialize, Deserialize};
+use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use tokio::sync::{broadcast, RwLock};
+use nucleo::{Config, Nucleo, Utf32String};
+use nucleo::pattern::{CaseMatching, Normalization};
+use anyhow::Result;
 
-use crate::search::types::{SearchItem, SearchResultItem};
+use crate::search::{SearchMessage, SearchResultItem};
 
-use super::SearchMessage;
-
-const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
-const BATCH_SIZE: u32 = 100;
-
-struct SearchState {
-    nucleo: Arc<RwLock<Nucleo<SearchItem>>>,
-    last_query: String,
-}
-
-// Internal message for tick handling
-enum InternalMessage {
-    Tick { search_id: String },
-}
-
+const BATCH_SIZE: usize = 50;
+const TICK_TIMEOUT_MS: u64 = 10;
 
 pub struct SearchManager {
-    searches: Arc<RwLock<HashMap<String, SearchState>>>,
-    event_sender: broadcast::Sender<SearchMessage>,
-    internal_sender: mpsc::UnboundedSender<InternalMessage>,
     workspace_path: PathBuf,
+    searcher: Arc<RwLock<Nucleo<PathBuf>>>,
+    event_sender: broadcast::Sender<SearchMessage>,
+    last_query: Arc<RwLock<Option<String>>>,
+    is_searching: Arc<RwLock<bool>>,
 }
 
 impl SearchManager {
-    pub fn new(workspace_path: PathBuf) -> Self {
+    pub fn new(workspace_path: PathBuf) -> Arc<Self> {
         let (event_sender, _) = broadcast::channel(100);
-        let (internal_sender, internal_receiver) = mpsc::unbounded_channel();
         
-        let manager = Self {
-            searches: Arc::new(RwLock::new(HashMap::new())),
-            event_sender,
-            internal_sender,
-            workspace_path,
-        };
+        // Create channel for notifying about new results
+        let (notify_tx, _) = broadcast::channel(1);
         
-        // Spawn internal message handler
-        let event_sender = manager.event_sender.clone();
-        let searches = manager.searches.clone();
-        tokio::spawn(async move {
-            Self::handle_internal_messages(searches, internal_receiver, event_sender).await;
+        let notify_tx_clone = notify_tx.clone();
+        let notify = Arc::new(move || {
+            // SOMETHINGS WRONG HERE. THIS IS NEVER CALLED FOR NEW RESULTS
+            println!("Nucleo notifying of new results");
+            let tx = notify_tx_clone.clone();
+            tokio::spawn(async move {
+                let _ = tx.send(());
+            });
         });
-        
-        manager
-    }
 
-    async fn handle_internal_messages(
-        searches: Arc<RwLock<HashMap<String, SearchState>>>,
-        mut receiver: mpsc::UnboundedReceiver<InternalMessage>,
-        event_sender: broadcast::Sender<SearchMessage>,
-    ) {
-        while let Some(message) = receiver.recv().await {
-            match message {
-                InternalMessage::Tick { search_id } => {
-                    if let Err(e) = Self::process_search_results(&searches, &event_sender, &search_id).await {
-                        eprintln!("Error processing search results: {}", e);
+        // Initialize nucleo with 1 column (just the path for now)
+        let searcher = Nucleo::new(
+            Config::DEFAULT.match_paths(),
+            notify,
+            None, // Use default thread count
+            1     // One column for path
+        );
+
+        let manager = Arc::new(Self {
+            workspace_path,
+            searcher: Arc::new(RwLock::new(searcher)),
+            event_sender,
+            last_query: Arc::new(RwLock::new(None)),
+            is_searching: Arc::new(RwLock::new(false)),
+        });
+
+        // Create a background task to continuously process results
+        let manager_clone = Arc::clone(&manager);
+        tokio::spawn(async move {
+            let mut rx = notify_tx.subscribe();
+            println!("Starting result processing loop");
+            
+            loop {
+                // Only process if we get a notification and are actively searching
+                if rx.recv().await.is_ok() {
+                    let is_searching = *manager_clone.is_searching.read().await;
+                    if is_searching {
+                        if let Err(e) = manager_clone.process_results().await {
+                            eprintln!("Error processing results: {}", e);
+                        }
                     }
                 }
             }
-        }
+        });
+
+        // Initialize file collection
+        let manager_clone = manager.clone();
+        tokio::spawn(async move {
+            if let Err(e) = manager_clone.initialize_files().await {
+                eprintln!("Failed to initialize files: {}", e);
+            }
+            println!("File initialization complete");
+        });
+
+        manager
     }
 
-    async fn process_search_results(
-        searches: &RwLock<HashMap<String, SearchState>>,
-        event_sender: &broadcast::Sender<SearchMessage>,
-        search_id: &str,
-    ) -> Result<()> {
-        let searches = searches.read().await;
-        if let Some(state) = searches.get(search_id) {
-            let nucleo = state.nucleo.read().await;
-            let snapshot = nucleo.snapshot();
+    async fn initialize_files(&self) -> Result<()> {
+        let searcher = self.searcher.read().await;
+        let injector = searcher.injector();
+        let mut count = 0;
+        
+        // Walk the workspace and inject files
+        for entry in walkdir::WalkDir::new(&self.workspace_path)
+            .follow_links(true)
+            .into_iter()
+            .filter_entry(|e| !Self::is_ignored(e.path())) 
+        {
+            let entry = entry?;
+            if !entry.file_type().is_file() {
+                continue;
+            }
+
+            let path = entry.path().to_path_buf();
             
-            let total_matches = snapshot.matched_item_count();
-            let mut current_batch = Vec::with_capacity(BATCH_SIZE as usize);
+            // Debug: Print the path being injected
+            println!("Injecting file: {:?}", path);
+            
+            // Inject the path, converting it to the format nucleo expects
+            injector.push(path, |path, columns| {
+                let path_str = path.to_string_lossy().to_string();
+                println!("Converting path to matcher column: {}", path_str);
+                columns[0] = path_str.into();
+            });
+            count += 1;
+        }
 
-            for (i, item) in snapshot.matched_items(0..total_matches).enumerate() {
-                current_batch.push(SearchResultItem {
-                    path: item.data.path.clone(),
-                    line_number: item.data.line_number,
-                    content: item.data.content.clone(),
-                });
+        println!("Injected {} files", count);
+        
+        // Debug: Print injector stats
+        println!("Total items in injector: {}", injector.injected_items());
+        
+        Ok(())
+    }
 
-                if current_batch.len() >= BATCH_SIZE as usize || i == (total_matches - 1) as usize {
-                    let is_complete = i == (total_matches - 1) as usize;
-                    let _ = event_sender.send(SearchMessage::Results {
-                        search_id: search_id.to_string(),
-                        items: std::mem::take(&mut current_batch),
-                        is_complete,
-                    });
-                }
+
+    fn is_ignored(path: &Path) -> bool {
+        path.components().any(|c| {
+            let s = c.as_os_str().to_string_lossy();
+            s == ".git" || s == "node_modules" || s == "target"
+        })
+    }
+
+    pub async fn create_search(
+        &self,
+        query: &str,
+        search_filename_only: bool,
+    ) -> Result<()> {
+        println!("Creating search for query: {}", query);
+        let mut searcher = self.searcher.write().await;
+        let mut last_query = self.last_query.write().await;
+        
+        // Check if we can optimize by using reparse
+        let should_reparse = if let Some(last) = last_query.as_ref() {
+            query.starts_with(last)
+        } else {
+            false
+        };
+
+        // Update the pattern
+        if should_reparse {
+            println!("Reparsing existing pattern");
+            searcher.pattern.reparse(0, query, CaseMatching::Smart, Normalization::Smart, true);
+        } else {
+            println!("Creating new pattern");
+            searcher.pattern.reparse(0, query, CaseMatching::Smart, Normalization::Smart, false);
+        }
+
+        // Debug: Print pattern state
+        println!("Pattern after update: {:?}", searcher.pattern);
+        
+        *last_query = Some(query.to_string());
+        *self.is_searching.write().await = true;
+        
+        // Debug: Print injector state
+        let injector = searcher.injector();
+        println!("Items in injector before tick: {}", injector.injected_items());
+        
+        // Trigger initial match and debug
+        let status = searcher.tick(TICK_TIMEOUT_MS);
+        println!("Initial tick status: {:?}", status);
+        
+        let snapshot = searcher.snapshot();
+        println!("Initial snapshot - matched items: {}", snapshot.matched_item_count());
+        
+        // Debug: Try to print first few items to see what we're matching against
+        // if injector.injected_items() > 0 {
+            // for i in 0..std::cmp::min(5, injector.injected_items()) {
+                // if let Some(item) = injector.get(i) {
+                    // println!("Sample item {}: {:?} with columns: {:?}", i, item.data, item.matcher_columns);
+                // }
+            // }
+        // }
+        
+        Ok(())
+    }
+
+
+    pub async fn close_search(&self) {
+        *self.is_searching.write().await = false;
+        let mut searcher = self.searcher.write().await;
+        searcher.restart(true);
+    }
+
+    async fn process_results(&self) -> Result<()> {
+        let mut searcher = self.searcher.write().await;
+        
+        // Debug: Print state before tick
+        println!("Processing results - current pattern: {:?}", searcher.pattern);
+        let injector = searcher.injector();
+        println!("Total items before tick: {}", injector.injected_items());
+        
+        let status = searcher.tick(TICK_TIMEOUT_MS);
+        println!("Tick status: {:?}", status);
+        
+        let snapshot = searcher.snapshot();
+        let matched_count = snapshot.matched_item_count();
+        
+        println!("Processing results, found {} matches", matched_count);
+        
+        if matched_count > 0 {
+            // Debug: Print first few matches to see what's matching
+            for (i, item) in snapshot.matched_items(0..std::cmp::min(5, matched_count)).enumerate() {
+                println!("Match {}: {:?} with columns: {:?}", i, item.data, item.matcher_columns);
             }
         }
+
+        if matched_count == 0 {
+            return Ok(());
+        }
+
+        // Send results in batches
+        let mut current_batch = Vec::with_capacity(BATCH_SIZE);
+        
+        for item in snapshot.matched_items(0..matched_count) {
+            println!("Processing result: {:?}", item.data);
+            let path = item.data.to_string_lossy().to_string();
+            
+            current_batch.push(SearchResultItem {
+                path,
+                line_number: 0,
+                content: String::new(),
+            });
+
+            if current_batch.len() >= BATCH_SIZE {
+                println!("Sending batch of {} results", current_batch.len());
+                let is_complete = false;
+                let message = SearchMessage::Results {
+                    search_id: String::new(), // Ignored in single search mode
+                    items: current_batch,
+                    is_complete,
+                };
+                
+                let _ = self.event_sender.send(message);
+                current_batch = Vec::with_capacity(BATCH_SIZE);
+            }
+        }
+
+        // Send any remaining results
+        if !current_batch.is_empty() {
+            println!("Sending final batch of {} results", current_batch.len());
+            let message = SearchMessage::Results {
+                search_id: String::new(),
+                items: current_batch,
+                is_complete: true,
+            };
+            
+            let _ = self.event_sender.send(message);
+        }
+
         Ok(())
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<SearchMessage> {
         self.event_sender.subscribe()
-    }
-
-    pub async fn create_search(
-        &self, 
-        query: &str, 
-        id: Option<String>,
-        search_filename_only: bool
-    ) -> Result<String> {
-        if let Some(id) = id {
-            let searches = self.searches.read().await;
-            if let Some(state) = searches.get(&id) {
-                let is_append = query.starts_with(&state.last_query);
-                let mut nucleo_instance = state.nucleo.write().await;
-                nucleo_instance.pattern.reparse(0, query, CaseMatching::Smart, Normalization::Smart, is_append);
-
-                let mut searches = self.searches.write().await;
-                if let Some(state) = searches.get_mut(&id) {
-                    state.last_query = query.to_string();
-                }
-                return Ok(id);
-            } else {
-                return Err(anyhow!("Search not found: {}", id));
-            }
-        }
-
-        let id = uuid::Uuid::new_v4().to_string();
-        let internal_sender = self.internal_sender.clone();
-        let search_id = id.clone();
-
-        let notify: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
-            let _ = internal_sender.send(InternalMessage::Tick {
-                search_id: search_id.clone()
-            });
-        });
-
-        let config = Config::DEFAULT;
-        let mut nucleo_instance = Nucleo::new(config, notify, None, 1);
-        nucleo_instance.pattern.reparse(0, query, CaseMatching::Smart, Normalization::Smart, false);
-
-        self.inject_items(&mut nucleo_instance, search_filename_only).await?;
-        
-        let state = SearchState {
-            nucleo: Arc::new(RwLock::new(nucleo_instance)),
-            last_query: query.to_string(),
-        };
-        
-        self.searches.write().await.insert(id.clone(), state);
-        Ok(id)
-    }
-
-    async fn inject_items(
-        &self,
-        nucleo: &mut Nucleo<SearchItem>,
-        search_filename_only: bool,
-    ) -> Result<()> {
-        let walker = WalkDir::new(&self.workspace_path)
-            .follow_links(true)
-            .into_iter()
-            .filter_map(|e| e.ok());
-
-        let injector = nucleo.injector();
-
-        if search_filename_only {
-            for entry in walker {
-                let path = entry.path().to_string_lossy().into_owned();
-                injector.push(
-                    SearchItem {
-                        path: path.clone(),
-                        line_number: 0,
-                        content: String::new(),
-                    },
-                    |item, columns| {
-                        columns[0] = item.path.clone().into();
-                    }
-                );
-            }
-        } else {
-            for entry in walker.filter(|e| e.file_type().is_file()) {
-                let metadata = match entry.metadata() {
-                    Ok(m) if m.len() <= MAX_FILE_SIZE => m,
-                    _ => continue,
-                };
-
-                if let Ok(content) = fs::read_to_string(entry.path()).await {
-                    let path = entry.path().to_string_lossy().into_owned();
-                    for (idx, line) in content.lines().enumerate() {
-                        injector.push(
-                            SearchItem {
-                                path: path.clone(),
-                                line_number: (idx + 1) as u32,
-                                content: line.to_string(),
-                            },
-                            |item, columns| {
-                                columns[0] = item.content.clone().into();
-                            }
-                        );
-                    }
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    pub async fn close_search(&self, id: String) -> Result<()> {
-        if self.searches.write().await.remove(&id).is_some() {
-            Ok(())
-        } else {
-            Err(anyhow!("Search not found: {}", id))
-        }
     }
 }

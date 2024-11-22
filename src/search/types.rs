@@ -29,14 +29,6 @@ struct ActiveSearch {
     _task: tokio::task::JoinHandle<()>,
 }
 
-
-#[derive(Clone)]
-pub struct SearchItem {
-    pub path: String,
-    pub line_number: u32,
-    pub content: String,
-}
-
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct SearchResultItem {
     pub path: String,

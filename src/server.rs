@@ -173,7 +173,7 @@ impl Server {
         
         let lsp_manager = Arc::new(LspManager::new(new_path, lsp_configs));
         let terminal_manager = Arc::new(TerminalManager::new());
-        let search_manager = Arc::new(SearchManager::new(workspace_path.clone()));
+        let search_manager = SearchManager::new(workspace_path.clone());
 
 
         Ok(Self {
@@ -521,7 +521,7 @@ impl Server {
                 }
             },
             ClientMessage::Search { id, query, search_filename_only } => {
-                match self.search_manager.create_search(&query, Some(id), search_filename_only).await {
+                match self.search_manager.create_search(&query, search_filename_only).await {
                     Ok(_) => ServerMessage::Success {},
                     Err(e) => ServerMessage::Error {
                         message: format!("Search failed: {}", e)
@@ -529,7 +529,7 @@ impl Server {
                 }
             },
             ClientMessage::CancelSearch {id} => {
-                self.search_manager.close_search(id).await;
+                self.search_manager.close_search().await;
                 ServerMessage::Success {}
             }, 
         };
