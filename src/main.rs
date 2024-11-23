@@ -2,6 +2,9 @@
 mod server;
 mod file_system;
 mod lsp;
+mod utils;
+mod terminal;
+mod search;
 
 use anyhow::Result;
 use clap::Parser;
@@ -16,6 +19,7 @@ struct Args {
     #[arg(short, long, default_value = "8080")]
     port: u16,
 }
+
 
 #[tokio::main]
 async fn main() -> Result<()> {

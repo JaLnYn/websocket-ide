@@ -204,7 +204,7 @@ impl LspServer {
         let content_length = msg.len();
         let header = format!("Content-Length: {}\r\n\r\n{}", content_length, msg);
         
-        println!("Sending message: {}", header);  // Debug log
+        //println!("Sending message: {}", header);  // Debug log
         
         let mut writer = self.writer.lock().await;
         writer.write_all(header.as_bytes()).await?;

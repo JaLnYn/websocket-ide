@@ -2,8 +2,7 @@ use lsp_types::{Position, CompletionList, Hover};
 // src/server.rs
 use serde::{Serialize, Deserialize};
 use tokio::{
-    net::{TcpListener, TcpStream},
-    time::Instant,
+    net::{TcpListener, TcpStream}, sync::mpsc, time::Instant
 };
 use futures_util::{
     SinkExt,
@@ -17,10 +16,18 @@ use std::{path::PathBuf, time::Duration};
 use anyhow::Result;
 use std::sync::Arc;
 
-use crate::file_system::{DocumentMetadata, DiffChange};
+use crate::{file_system::{DiffChange, DocumentMetadata}, search::{SearchManager, SearchOptions, SearchResultItem}};
 use crate::lsp::{types::LspConfiguration, lsp_manager::LspManager};
 
 use crate::file_system::{FileSystem, FileNode, FileEvent, VersionedDocument};
+use crate::utils::path_utils::{get_full_path, canonicalize_document_path};
+
+use crate::terminal::{
+    types::{TerminalMessage, TerminalSize},
+    terminal_manager::TerminalManager,
+};
+
+use crate::search::{SearchMessage, SearchStatus};
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content")]
@@ -49,11 +56,34 @@ pub enum ClientMessage {
         path: String,
         position: Position,
     },
+
+    CreateTerminal {
+        cols: u16,
+        rows: u16,
+    },
+    ResizeTerminal {
+        id: String,
+        cols: u16,
+        rows: u16,
+    },
+    WriteTerminal {
+        id: String,
+        data: Vec<u8>,
+    },
+    CloseTerminal {
+        id: String,
+    },
+    Search {
+        query: String,
+        search_content: bool,
+    },
+    CancelSearch{
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content")]
-enum ServerMessage {
+pub enum ServerMessage {
     Success {},
     DirectoryContent { path: PathBuf, content: Vec<FileNode> },
     FileSystemEvents { events: Vec<FileEvent> },
@@ -89,13 +119,36 @@ enum ServerMessage {
         locations: Vec<lsp_types::Location>,
     },
     Error { message: String },
+    TerminalCreated { terminal_id: String },
+    TerminalOutput { 
+        terminal_id: String,
+        data: Vec<u8>,
+    },
+    TerminalClosed { 
+        id: String 
+    },
+    TerminalError {
+        terminal_id: String,
+        error: String,
+    },
+    SearchStatus {
+        status: SearchStatus,
+    },
+    SearchResults {
+        search_id: String,
+        items: Vec<SearchResultItem>,
+        is_complete: bool,
+    },
 }
 
 pub struct Server {
     port: u16,
     file_system: Arc<FileSystem>,
     lsp_manager: Arc<LspManager>,
+    terminal_manager: Arc<TerminalManager>,
+    search_manager: Arc<SearchManager>,
 }
+
 
 impl Server {
     pub fn new(workspace_path: PathBuf, port: u16) -> Result<Self> {
@@ -117,60 +170,17 @@ impl Server {
         }
         
         let lsp_manager = Arc::new(LspManager::new(new_path, lsp_configs));
+        let terminal_manager = Arc::new(TerminalManager::new());
+        let search_manager = SearchManager::new(workspace_path.clone());
+
 
         Ok(Self {
             port,
             file_system,
             lsp_manager,
+            terminal_manager,
+            search_manager
         })
-    }
-
-    pub fn get_full_path(&self, relative_path: &str) -> Result<PathBuf> {
-        // Check if the path is relative or absolute
-        
-        let path = PathBuf::from(relative_path);
-        if path.is_absolute() {
-            return Ok(path);
-        }
-
-        let path = if relative_path.is_empty() {
-            self.file_system.get_workspace_path()
-        } else {
-            &self.file_system.get_workspace_path().join(relative_path)
-        };
-        
-        let canonical = path.canonicalize()?;
-        if !canonical.starts_with(&self.file_system.get_workspace_path()) {
-            anyhow::bail!("Path is outside of workspace: {:?}", canonical);
-        }
-        
-        Ok(canonical)
-    }
-
-    pub fn canonicalize_document_path(&self, doc: &VersionedDocument) -> Result<PathBuf> {
-        // If the path is already absolute and within workspace, return it
-        if doc.uri.is_absolute() {
-            let canonical = doc.uri.canonicalize()?;
-            if canonical.starts_with(self.file_system.get_workspace_path()) {
-                return Ok(canonical);
-            }
-            println!("-- Path is outside of workspace: {:?}", canonical);
-        }
-
-        // Handle relative path
-        let path = if doc.uri.to_string_lossy().is_empty() {
-            self.file_system.get_workspace_path().to_path_buf()
-        } else {
-            self.file_system.get_workspace_path().join(&doc.uri)
-        };
-        
-        let canonical = path.canonicalize()?;
-        if !canonical.starts_with(self.file_system.get_workspace_path()) {
-            anyhow::bail!("Path is outside of workspace - : {:?}", canonical);
-        }
-        
-        println!("HERE");
-        Ok(canonical)
     }
 
     async fn handle_client_message(
@@ -184,7 +194,7 @@ impl Server {
         let response = match message {
             ClientMessage::GetDirectory { path: relative_path } => {
                 println!(  "Received GetDirectory message: {:?}", relative_path);
-                match self.get_full_path(&relative_path) {
+                match get_full_path(self.file_system.get_workspace_path(), &relative_path) {
                     Ok(full_path) => {
                         match self.file_system.load_directory(&full_path).await {
                             Ok(content) => {
@@ -205,7 +215,7 @@ impl Server {
                 }
             },
             ClientMessage::RefreshDirectory { path: relative_path } => {
-                match self.get_full_path(&relative_path) {
+                match get_full_path(self.file_system.get_workspace_path(), &relative_path) {
                     Ok(full_path) => {
                         match self.file_system.refresh_directory(&full_path).await {
                             Ok(content) => {
@@ -226,7 +236,7 @@ impl Server {
                 }
             },
             ClientMessage::CloseFile { path } => {
-                match self.get_full_path(&path) {
+                match get_full_path(self.file_system.get_workspace_path(), &path) {
                     Ok(full_path) => {
                         // Validate file was open
                         let document_state = self.file_system
@@ -280,7 +290,7 @@ impl Server {
                 }
             },
             ClientMessage::OpenFile { path } => {
-                match self.get_full_path(&path) {
+                match get_full_path(self.file_system.get_workspace_path(), &path) {
                     Ok(full_path) => {
                         // Validate file exists and is readable before opening
                         if !full_path.exists() {
@@ -323,7 +333,7 @@ impl Server {
             },
     
             ClientMessage::ChangeFile { document, changes } => {
-                let path = match self.canonicalize_document_path(&document) {
+                let path = match canonicalize_document_path(self.file_system.get_workspace_path(), &document) {
                     Ok(p) => p,
                     Err(e) => return Ok(write.send(Message::Text(
                         serde_json::to_string(&ServerMessage::Error {
@@ -369,7 +379,7 @@ impl Server {
             },
     
             ClientMessage::SaveFile { document } => {
-                let path = match self.canonicalize_document_path(&document) {
+                let path = match canonicalize_document_path(self.file_system.get_workspace_path(), &document) {
                     Ok(p) => p,
                     Err(e) => return Ok(write.send(Message::Text(
                         serde_json::to_string(&ServerMessage::Error {
@@ -407,7 +417,7 @@ impl Server {
             },
             ClientMessage::Completion { path, position } => {
                 println!("Received completion request: {:?}", path);
-                match self.get_full_path(&path) {
+                match get_full_path(self.file_system.get_workspace_path(), &path) {
                     Ok(full_path) => {
                         match self.lsp_manager.get_completions(&full_path, position).await {
                             Ok(Some(completions)) => ServerMessage::CompletionResponse { 
@@ -432,7 +442,7 @@ impl Server {
 
             ClientMessage::Hover { path, position } => {
                 println!("Received hover request: {:?}", path);
-                match self.get_full_path(&path) {
+                match get_full_path(self.file_system.get_workspace_path(), &path) {
                     Ok(full_path) => {
                         match self.lsp_manager.get_hover(&full_path, position).await {
                             Ok(Some(hover)) => ServerMessage::HoverResponse { hover },
@@ -457,7 +467,7 @@ impl Server {
 
             ClientMessage::Definition { path, position } => {
                 println!("Received definition request: {:?}", path);
-                match self.get_full_path(&path) {
+                match get_full_path(self.file_system.get_workspace_path(), &path) {
                     Ok(full_path) => {
                         match self.lsp_manager.get_definition(&full_path, position).await {
                             Ok(Some(locations)) => ServerMessage::DefinitionResponse { 
@@ -476,6 +486,50 @@ impl Server {
                     }
                 }
             },
+            ClientMessage::CreateTerminal { cols, rows } => {
+                match self.terminal_manager.create_terminal(TerminalSize { cols, rows }).await {
+                    Ok(id) => ServerMessage::TerminalCreated { terminal_id: id },
+                    Err(e) => ServerMessage::Error { 
+                        message: format!("Failed to create terminal: {}", e) 
+                    },
+                }
+            },
+            ClientMessage::WriteTerminal { id, data } => {
+                match self.terminal_manager.write_to_terminal(&id, &data).await {
+                    Ok(_) => ServerMessage::Success {},
+                    Err(e) => ServerMessage::Error { 
+                        message: format!("Failed to write to terminal: {}", e) 
+                    },
+                }
+            },
+            ClientMessage::ResizeTerminal { id, cols, rows } => {
+                match self.terminal_manager.resize_terminal(&id, TerminalSize { cols, rows }).await {
+                    Ok(_) => ServerMessage::Success {},
+                    Err(e) => ServerMessage::Error { 
+                        message: format!("Failed to resize terminal: {}", e) 
+                    },
+                }
+            },
+            ClientMessage::CloseTerminal { id } => {
+                match self.terminal_manager.close_terminal(&id).await {
+                    Ok(_) => ServerMessage::TerminalClosed { id },
+                    Err(e) => ServerMessage::Error { 
+                        message: format!("Failed to close terminal: {}", e) 
+                    },
+                }
+            },
+            ClientMessage::Search { query, search_content } => {
+                match self.search_manager.clone().create_search(&query, search_content).await {
+                    Ok(_) => ServerMessage::Success { },
+                    Err(e) => ServerMessage::Error {
+                        message: format!("Search failed: {}", e)
+                    }
+                }
+            },
+            ClientMessage::CancelSearch {} => {
+                self.search_manager.close_search().await;
+                ServerMessage::Success {}
+            }, 
         };
 
         if matches!(response, ServerMessage::Success {}) {
@@ -483,29 +537,35 @@ impl Server {
         }
 
         let message = serde_json::to_string(&response)?;
-        println!("Sending message: {}", message);
+        // println!("Sending message: {}", message);
         write.send(Message::Text(message)).await?;
         Ok(())
     }
 
     async fn handle_connection(&self, stream: TcpStream) -> Result<()> {
+        println!("New connection attempt from: {}", stream.peer_addr()?);
+
         let ws_stream = accept_async(stream).await?;
         let (mut write, mut read) = ws_stream.split();
         
         let mut fs_events = self.file_system.subscribe();
+        let mut terminal_events = self.terminal_manager.subscribe();
+        let mut search_events = self.search_manager.subscribe();
+
         
         // Buffer for collecting events
         let mut event_buffer = Vec::with_capacity(100);
         let mut last_send = Instant::now();
         
         loop {
+            println!("Loop iteration");
             tokio::select! {
                 Some(msg) = read.next() => {
+                    println!("Server received message: {:?}", msg);
                     match msg? {
                         Message::Text(text) => {
                             match serde_json::from_str::<ClientMessage>(&text) {
                                 Ok(client_message) => {
-                                    println!("Received message: {}", text);
                                     if let Err(e) = self.handle_client_message(client_message, &mut write).await {
                                         println!("Invalid message format: {}", e);
                                         let error_message = ServerMessage::Error {
@@ -528,7 +588,7 @@ impl Server {
                     }
                 }
                 Ok(event) = fs_events.recv() => {
-                    println!("Received file system event: {:?}", event);
+                    println!("Server received file system event");
                     event_buffer.push(event);
                     
                     if event_buffer.len() >= 100 || last_send.elapsed() >= Duration::from_millis(100) {
@@ -540,6 +600,50 @@ impl Server {
                                 let _ = write.send(Message::Text(text)).await;
                             }
                             last_send = Instant::now();
+                        }
+                    }
+                }
+                Ok(term_msg) = terminal_events.recv() => {
+                    println!("Server received terminal message");
+                    match term_msg {
+                        TerminalMessage::Output { terminal_id, data } => {
+                            println!("Terminal output: {:?}", data);
+                            let message = ServerMessage::TerminalOutput { terminal_id, data };
+                            if let Ok(text) = serde_json::to_string(&message) {
+                                let _ = write.send(Message::Text(text)).await;
+                            }
+                        }
+                        TerminalMessage::Error { terminal_id, error } => {
+                            println!("Terminal error: {:?}", error);
+                            let message = ServerMessage::TerminalError { terminal_id, error };
+                            if let Ok(text) = serde_json::to_string(&message) {
+                                let _ = write.send(Message::Text(text)).await;
+                            }
+                        }
+                        _ => {
+                            println!("Unhandled terminal message: {:?}", term_msg);
+                        }
+                    }
+                }
+                Ok(search_msg) = search_events.recv() => {
+                    match search_msg {
+                        SearchMessage::Results { search_id, items, is_complete } => {
+                            let message = ServerMessage::SearchResults { 
+                                search_id,
+                                items,
+                                is_complete
+                            };
+                            if let Ok(json) = serde_json::to_string(&message) {
+                                write.send(Message::Text(json)).await?;
+                            }
+                        },
+                        SearchMessage::Error { search_id, error } => {
+                            let message = ServerMessage::Error { 
+                                message: format!("Search error ({}): {}", search_id, error)
+                            };
+                            if let Ok(json) = serde_json::to_string(&message) {
+                                write.send(Message::Text(json)).await?;
+                            }
                         }
                     }
                 }
@@ -576,12 +680,15 @@ impl Server {
     }
 }
 
+// Make Server cloneable
 impl Clone for Server {
     fn clone(&self) -> Self {
         Self {
             port: self.port,
             file_system: Arc::clone(&self.file_system),
             lsp_manager: Arc::clone(&self.lsp_manager),
+            terminal_manager: Arc::clone(&self.terminal_manager),
+            search_manager: Arc::clone(&self.search_manager),
         }
     }
 }
