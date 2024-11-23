@@ -75,7 +75,7 @@ pub enum ClientMessage {
     },
     Search {
         query: String,
-        search_filename_only: bool,
+        search_content: bool,
     },
     CancelSearch{
     },
@@ -518,8 +518,8 @@ impl Server {
                     },
                 }
             },
-            ClientMessage::Search { query, search_filename_only } => {
-                match self.search_manager.clone().create_search(query, search_filename_only).await {
+            ClientMessage::Search { query, search_content } => {
+                match self.search_manager.clone().create_search(&query, search_content).await {
                     Ok(_) => ServerMessage::Success { },
                     Err(e) => ServerMessage::Error {
                         message: format!("Search failed: {}", e)

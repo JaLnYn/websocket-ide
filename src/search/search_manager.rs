@@ -7,6 +7,7 @@ use tokio::time::interval;
 use nucleo::{Config, Nucleo, Utf32String};
 use nucleo::pattern::{CaseMatching, Normalization};
 use anyhow::Result;
+use tokio::fs;
 
 use crate::search::{SearchMessage, SearchResultItem};
 
@@ -14,29 +15,43 @@ const BATCH_SIZE: usize = 50;
 const TICK_TIMEOUT_MS: u64 = 10;
 const POLL_INTERVAL_MS: u64 = 100;
 const SEARCH_TIMEOUT_SECS: u64 = 10;
+const MAX_FILE_SIZE: u64 = 1024 * 1024; // 1MB
+
+#[derive(Clone, PartialEq, Debug)]
+enum SearchMode {
+    Filename,
+    Content,
+}
+
+
+#[derive(Clone)]
+struct LineContent {
+    path: PathBuf,
+    line_number: u32,
+    line: String,
+}
 
 pub struct SearchManager {
     workspace_path: PathBuf,
-    searcher: Arc<RwLock<Nucleo<PathBuf>>>,
+    searcher: Arc<RwLock<Nucleo<LineContent>>>,
     event_sender: broadcast::Sender<SearchMessage>,
     last_query: Arc<RwLock<Option<String>>>,
     is_searching: Arc<RwLock<bool>>,
+    current_mode: Arc<RwLock<SearchMode>>,
 }
 
 impl SearchManager {
     pub fn new(workspace_path: PathBuf) -> Arc<Self> {
-        let (event_sender, _ ) = broadcast::channel(100);
+        let (event_sender, _) = broadcast::channel(100);
 
-        // Notify is now only used for file system changes
-        let notify = Arc::new(|| {
-            //println!("Nucleo notifying of file system changes"); // why not printing
-        });
+        let notify = Arc::new(|| {});
 
+        // Change to single column
         let searcher = Nucleo::new(
             Config::DEFAULT.match_paths(),
             notify,
             None,
-            1
+            1  // Single column
         );
 
         let manager = Arc::new(Self {
@@ -45,6 +60,7 @@ impl SearchManager {
             event_sender,
             last_query: Arc::new(RwLock::new(None)),
             is_searching: Arc::new(RwLock::new(false)),
+            current_mode: Arc::new(RwLock::new(SearchMode::Filename)),
         });
 
         // Create polling task for search results
@@ -58,12 +74,10 @@ impl SearchManager {
                 let is_searching = *manager_clone.is_searching.read().await;
                 
                 if is_searching {
-                    // Initialize search start time
                     if search_start.is_none() {
                         search_start = Some(std::time::Instant::now());
                     }
 
-                    // Check for timeout
                     if let Some(start) = search_start {
                         if start.elapsed() > Duration::from_secs(SEARCH_TIMEOUT_SECS) {
                             println!("Search timed out after {} seconds", SEARCH_TIMEOUT_SECS);
@@ -84,13 +98,11 @@ impl SearchManager {
         manager
     }
 
-
-    async fn initialize_files(&self) -> Result<()> {
+    async fn initialize_files(&self, search_mode: &SearchMode) -> Result<()> {
         let searcher = self.searcher.read().await;
         let injector = searcher.injector();
         let mut count = 0;
         
-        // Walk the workspace and inject files
         for entry in walkdir::WalkDir::new(&self.workspace_path)
             .follow_links(true)
             .into_iter()
@@ -103,23 +115,54 @@ impl SearchManager {
 
             let path = entry.path().to_path_buf();
             
-            // Debug: Print the path being injected
-            // println!("Injecting file: {:?}", path);
-            
-            // Inject the path, converting it to the format nucleo expects
-            injector.push(path, |path, columns| {
-                let path_str = path.to_string_lossy().to_string();
-                // println!("Converting path to matcher column: {}", path_str);
-                columns[0] = path_str.into();
-            });
+            match search_mode {
+                SearchMode::Content => {
+                    // Check file size before reading
+                    if let Ok(metadata) = fs::metadata(&path).await {
+                        if metadata.len() > MAX_FILE_SIZE {
+                            println!("Skipping large file: {:?}", path);
+                            continue;
+                        }
+
+                        match fs::read_to_string(&path).await {
+                            Ok(content) => {
+                                for (line_number, line) in content.lines().enumerate() {
+                                    let line_content = LineContent {
+                                        path: path.clone(),
+                                        line_number: (line_number + 1) as u32,
+                                        line: line.to_string(),
+                                    };
+
+                                    injector.push(line_content, |content, columns| {
+                                        // Only use single column - content for content search
+                                        columns[0] = content.line.clone().into();
+                                    });
+                                }
+                            }
+                            Err(e) => {
+                                println!("Error reading file {:?}: {}", path, e);
+                                continue;
+                            }
+                        }
+                    }
+                }
+                SearchMode::Filename => {
+                    let line_content = LineContent {
+                        path: path.clone(),
+                        line_number: 0,
+                        line: String::new(),
+                    };
+
+                    injector.push(line_content, |content, columns| {
+                        // Only use single column - path for filename search
+                        columns[0] = content.path.to_string_lossy().to_string().into();
+                    });
+                }
+            }
             count += 1;
         }
 
-        println!("Injected {} files", count);
-        
-        // Debug: Print injector stats
-        println!("Total items in injector: {}", injector.injected_items());
-        
+        println!("Injected {} files for mode {:?}", count, search_mode);
         Ok(())
     }
 
@@ -133,49 +176,49 @@ impl SearchManager {
 
     pub async fn create_search(
         self: Arc<Self>,
-        query: String,
-        search_filename_only: bool,
+        query: &str,
+        search_content: bool,
     ) -> Result<()> {
-        // Start async initialization if needed
+        let new_mode = if search_content {
+            SearchMode::Content
+        } else {
+            SearchMode::Filename
+        };
+    
+        let mut current_mode = self.current_mode.write().await;
         let mut last_query = self.last_query.write().await;
-
-        let mut initialization_needed = !*self.is_searching.read().await;
-
+        let mode_changed = *current_mode != new_mode;
+        *current_mode = new_mode.clone();
+    
+        // Determine if we need to reinitialize
+        let initialization_needed = mode_changed;
+    
         let should_reparse = if let Some(last) = last_query.as_ref() {
-            let begins_with = query.starts_with(last);
-            initialization_needed = !begins_with;
-            begins_with
+            query.starts_with(last) && !mode_changed
         } else {
             false
         };
-
+    
         if initialization_needed {
-            println!("Starting new search");
+            println!("Starting new search with mode: {:?}", new_mode);
             self.searcher.write().await.restart(true);
-            let manager_clone = self.clone();
-            tokio::spawn(async move {
-                if let Err(e) = manager_clone.initialize_files().await { 
-                    // this is some pretty horrid code. Will fix in the future. I just want to initialize the files here
-                    eprintln!("Failed to initialize files: {}", e);
-                    *manager_clone.is_searching.write().await = false;
-                    return;
-                }
-                
-                // Set up search pattern after initialization
-            });
+            
+            // Initialize files and wait for completion
+            if let Err(e) = self.initialize_files(&new_mode).await {
+                eprintln!("Failed to initialize files: {}", e);
+                return Err(e);
+            }
+    
+            // After initialization, set up the search pattern
             let mut searcher = self.searcher.write().await;
-            searcher.pattern.reparse(0, &query, CaseMatching::Smart, Normalization::Smart, false);
-
+            searcher.pattern.reparse(0, query, CaseMatching::Smart, Normalization::Smart, false);
+            
             *last_query = Some(query.to_string());
             *self.is_searching.write().await = true;
         } else {
-            // If already initialized, just update the pattern
-
             println!("Continuing search");
             let mut searcher = self.searcher.write().await;
-
-
-            searcher.pattern.reparse(0, &query, CaseMatching::Smart, Normalization::Smart, should_reparse);
+            searcher.pattern.reparse(0, query, CaseMatching::Smart, Normalization::Smart, should_reparse);
             
             *last_query = Some(query.to_string());
             *self.is_searching.write().await = true;
@@ -184,32 +227,37 @@ impl SearchManager {
         Ok(())
     }
 
-
-    pub async fn close_search(&self) {
-        *self.is_searching.write().await = false;
-        let mut searcher = self.searcher.write().await;
-        searcher.restart(true);
-    }
-
     async fn process_results(&self) -> Result<()> {
         let mut searcher = self.searcher.write().await;
+        let current_mode = self.current_mode.read().await;
         
         let status = searcher.tick(TICK_TIMEOUT_MS);
         let snapshot = searcher.snapshot();
         let matched_count = snapshot.matched_item_count();
         let is_done = !status.running;
-        println!("Found {} matches", matched_count);
 
-        // Send any matches found
         if matched_count > 0 {
             let mut current_batch = Vec::with_capacity(BATCH_SIZE);
+            
             for item in snapshot.matched_items(0..matched_count) {
-                let path = item.data.to_string_lossy().to_string();
-                current_batch.push(SearchResultItem {
-                    path,
-                    line_number: 0,
-                    content: String::new(),
-                });
+                let line_content = &item.data;
+                
+                match *current_mode {
+                    SearchMode::Content => {
+                        current_batch.push(SearchResultItem {
+                            path: line_content.path.to_string_lossy().to_string(),
+                            line_number: line_content.line_number,
+                            content: line_content.line.clone(),
+                        });
+                    }
+                    SearchMode::Filename => {
+                        current_batch.push(SearchResultItem {
+                            path: line_content.path.to_string_lossy().to_string(),
+                            line_number: 0,
+                            content: String::new(),
+                        });
+                    }
+                }
 
                 if current_batch.len() >= BATCH_SIZE {
                     let message = SearchMessage::Results {
@@ -222,7 +270,6 @@ impl SearchManager {
                 }
             }
 
-            // Send remaining results
             if !current_batch.is_empty() {
                 let message = SearchMessage::Results {
                     search_id: String::new(),
@@ -232,7 +279,6 @@ impl SearchManager {
                 let _ = self.event_sender.send(message);
             }
         } else if is_done {
-            // If no matches but search is done, send empty complete message
             let message = SearchMessage::Results {
                 search_id: String::new(),
                 items: vec![],
@@ -241,12 +287,17 @@ impl SearchManager {
             let _ = self.event_sender.send(message);
         }
 
-        // Update search status if done
         if is_done {
             *self.is_searching.write().await = false;
         }
 
         Ok(())
+    }
+
+    pub async fn close_search(&self) {
+        *self.is_searching.write().await = false;
+        let mut searcher = self.searcher.write().await;
+        searcher.restart(true);
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<SearchMessage> {
