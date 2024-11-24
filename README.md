@@ -2,7 +2,9 @@
 
 A lightweight code server that lets you build custom websocket-based IDEs. Built with Rust for speed and reliability. Perfect for web-based coding environments, self-hosted solutions, or custom IDE implementations.
 
-An example browser IDE is right here: [🍌 JaLnYn/browser-ide](https://github.com/JaLnYn/browser-ide)
+An example browser IDE is right here: [🍌 JaLnYn/browser-ide](https://github.com/JaLnYn/browser-ide) (It's ugly. Sorry!)
+<img width="1488" alt="image" src="https://github.com/user-attachments/assets/26a01a96-0d15-4d61-8799-12e0e0254663">
+
 
 ## Features
 
@@ -29,8 +31,6 @@ cd browser-ide
 npm i
 npm run dev
 ```
-
-<img width="1488" alt="image" src="https://github.com/user-attachments/assets/26a01a96-0d15-4d61-8799-12e0e0254663">
 
 Note: if you want to test the lsp, you have to install rust-analyzer. Instructions [HERE](https://rust-analyzer.github.io/manual.html#rust-analyzer-language-server-binary)
 
