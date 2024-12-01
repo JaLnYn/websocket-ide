@@ -1,29 +1,44 @@
-use std::path::PathBuf;
-use anyhow::Result;
-use crate::file_system::VersionedDocument; 
 
-pub fn get_full_path(workspace_root: &PathBuf, relative_path: &str) -> Result<PathBuf> {
+use crate::file_system::VersionedDocument;
+use anyhow::bail;
+use anyhow::Result;
+use std::path::PathBuf;
+
+pub fn join_workspace_path(workspace_root: &PathBuf, relative_path: &str) -> Result<PathBuf> {
     // If empty path, return workspace root
     if relative_path.is_empty() {
         return Ok(workspace_root.clone());
     }
 
-    // Handle absolute vs relative paths
+
+    // If path starts with workspace root, use it directly
     let path = PathBuf::from(relative_path);
-    let path = if path.is_absolute() {
-        path
-    } else {
-        workspace_root.join(relative_path)
-    };
-    
-    // Canonicalize and validate
-    let canonical = path.canonicalize()?;
+    if relative_path.starts_with(workspace_root.to_string_lossy().as_ref()) {
+        return Ok(path);
+    }
+
+    // Otherwise join with workspace root
+    let full_path = workspace_root.join(relative_path);
+
+    // Basic validation - check it would be within workspace
+    if !full_path.starts_with(workspace_root) {
+        bail!("Path would be outside of workspace");
+    }
+
+    Ok(full_path)
+}
+
+pub fn get_full_path(workspace_root: &PathBuf, relative_path: &str) -> Result<PathBuf> {
+    let joined_path = join_workspace_path(workspace_root, relative_path)?;
+    let canonical = joined_path.canonicalize()?;
     validate_workspace_path(workspace_root, &canonical)?;
-    
     Ok(canonical)
 }
 
-pub fn canonicalize_document_path(workspace_root: &PathBuf, doc: &VersionedDocument) -> Result<PathBuf> {
+pub fn canonicalize_document_path(
+    workspace_root: &PathBuf,
+    doc: &VersionedDocument,
+) -> Result<PathBuf> {
     // Handle absolute paths
     if doc.uri.is_absolute() {
         let canonical = doc.uri.canonicalize()?;
@@ -38,22 +53,26 @@ pub fn canonicalize_document_path(workspace_root: &PathBuf, doc: &VersionedDocum
     } else {
         workspace_root.join(&doc.uri)
     };
-    
+
     let canonical = path.canonicalize()?;
     validate_workspace_path(workspace_root, &canonical)?;
-    
+
     Ok(canonical)
 }
 
 fn validate_workspace_path(workspace_root: &PathBuf, path: &PathBuf) -> Result<()> {
+    println!("validating");
     if !path.starts_with(workspace_root) {
         anyhow::bail!("Path is outside of workspace: {:?}", path);
     }
+    println!("done validating");
     Ok(())
 }
 
 pub fn to_relative_path(workspace_root: &PathBuf, path: &PathBuf) -> Option<PathBuf> {
-    path.strip_prefix(workspace_root).ok().map(|p| p.to_path_buf())
+    path.strip_prefix(workspace_root)
+        .ok()
+        .map(|p| p.to_path_buf())
 }
 
 #[cfg(test)]

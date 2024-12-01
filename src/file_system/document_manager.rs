@@ -1,10 +1,10 @@
-use std::path::PathBuf;
-use std::collections::{HashMap, VecDeque};
-use tokio::sync::RwLock;
-use anyhow::{Result, Context, bail};
-use serde::{Serialize, Deserialize};
-use tokio::fs;
+use anyhow::{bail, Context, Result};
 use encoding_rs::{Encoding, UTF_8};
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
+use tokio::fs;
+use tokio::sync::RwLock;
 
 // File size thresholds and configuration
 const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10MB default limit
@@ -46,7 +46,7 @@ pub struct DocumentMetadata {
 #[derive(Debug, Clone)]
 pub struct DocumentState {
     pub is_open: bool,
-    pub version: i32,      // For LSP synchronization
+    pub version: i32, // For LSP synchronization
     pub last_modification: u64,
     pub is_dirty: bool,
 }
@@ -83,13 +83,11 @@ pub struct DiffChange {
     pub removed: bool,
 }
 
-
-
 impl DocumentManager {
     pub fn new(workspace_path: PathBuf) -> Result<Self> {
         let workspace_path = workspace_path.canonicalize()?;
         println!("Initialized document manager at: {:?}", workspace_path);
-        
+
         Ok(Self {
             workspace_path,
             document_states: RwLock::new(HashMap::new()),
@@ -125,7 +123,7 @@ impl DocumentManager {
         let mut detector = chardetng::EncodingDetector::new();
         detector.feed(data, true);
         let encoding = detector.guess(None, true);
-        
+
         FileEncoding {
             encoding: encoding.name().to_string(),
             confidence: 0.9, // chardetng doesn't provide confidence, so we use a default
@@ -174,13 +172,14 @@ impl DocumentManager {
     ) -> Result<VersionedDocument> {
         let path = &doc.uri;
         let mut states = self.document_states.write().await;
-        
+
         if let Some(state) = states.get_mut(path) {
             // Version check
             if state.version >= doc.version {
                 return Err(anyhow::anyhow!(
-                    "Version conflict: document has been modified. Server: {}, client: {}", 
-                    state.version, doc.version
+                    "Version conflict: document has been modified. Server: {}, client: {}",
+                    state.version,
+                    doc.version
                 ));
             }
 
@@ -198,13 +197,13 @@ impl DocumentManager {
             let mut result = String::new();
             let mut last_position = 0;
             let chars: Vec<char> = current_content.chars().collect();
-            
+
             println!("Applying changes to document:");
             println!("Original content: {}", current_content);
-            
+
             for change in changes {
                 println!("Processing change: {:?}", change);
-                
+
                 if change.removed {
                     // Skip the content that's being removed
                     last_position += change.value.chars().count();
@@ -213,12 +212,12 @@ impl DocumentManager {
                     let unchanged_len = change.value.chars().count();
                     if last_position + unchanged_len > chars.len() {
                         return Err(anyhow::anyhow!(
-                            "Invalid change: position {} exceeds content length {}", 
-                            last_position + unchanged_len, 
+                            "Invalid change: position {} exceeds content length {}",
+                            last_position + unchanged_len,
                             chars.len()
                         ));
                     }
-                    
+
                     // Append the unchanged content
                     result.extend(chars[last_position..last_position + unchanged_len].iter());
                     last_position += unchanged_len;
@@ -236,10 +235,16 @@ impl DocumentManager {
                 size: metadata.len(),
                 is_directory: metadata.is_dir(),
                 is_symlink: metadata.file_type().is_symlink(),
-                created_at: metadata.created().ok().and_then(|t| 
-                    t.duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs())),
-                modified_at: metadata.modified().ok().and_then(|t| 
-                    t.duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs())),
+                created_at: metadata.created().ok().and_then(|t| {
+                    t.duration_since(std::time::UNIX_EPOCH)
+                        .ok()
+                        .map(|d| d.as_secs())
+                }),
+                modified_at: metadata.modified().ok().and_then(|t| {
+                    t.duration_since(std::time::UNIX_EPOCH)
+                        .ok()
+                        .map(|d| d.as_secs())
+                }),
                 readonly: metadata.permissions().readonly(),
                 file_type: FileType::Text,
                 encoding: FileEncoding {
@@ -249,7 +254,8 @@ impl DocumentManager {
                 line_ending: self.detect_line_ending(&result),
             };
 
-            self.cache_content(path.clone(), result, doc_metadata).await?;
+            self.cache_content(path.clone(), result, doc_metadata)
+                .await?;
 
             // Update state
             state.version += 1;
@@ -268,18 +274,16 @@ impl DocumentManager {
         }
     }
 
-    pub async fn save_document(
-        &self,
-        doc: &VersionedDocument,
-    ) -> Result<VersionedDocument> {
+    pub async fn save_document(&self, doc: &VersionedDocument) -> Result<VersionedDocument> {
         let path = &doc.uri;
         let mut states = self.document_states.write().await;
-        
+
         if let Some(state) = states.get_mut(path) {
             if state.version >= doc.version {
                 return Err(anyhow::anyhow!(
-                    "Version conflict: document has been modified. Server: {}, client: {}", 
-                    state.version, doc.version
+                    "Version conflict: document has been modified. Server: {}, client: {}",
+                    state.version,
+                    doc.version
                 ));
             }
 
@@ -295,7 +299,7 @@ impl DocumentManager {
 
             // Write to file
             tokio::fs::write(&path, &content).await?;
-            
+
             // Update state
             state.is_dirty = false;
             state.last_modification = std::time::SystemTime::now()
@@ -325,10 +329,13 @@ impl DocumentManager {
         let metadata = fs::metadata(path)
             .await
             .with_context(|| format!("Failed to read metadata for file: {:?}", path))?;
-            
+
         if metadata.len() > MAX_FILE_SIZE {
-            bail!("File is too large to load (size: {} bytes, max: {} bytes)", 
-                  metadata.len(), MAX_FILE_SIZE);
+            bail!(
+                "File is too large to load (size: {} bytes, max: {} bytes)",
+                metadata.len(),
+                MAX_FILE_SIZE
+            );
         }
 
         // Detect file type before reading
@@ -350,14 +357,17 @@ impl DocumentManager {
 
         // Detect encoding
         let encoding = self.detect_encoding(&content);
-        
+
         // Convert to string using detected encoding
         let (content, _, had_errors) = Encoding::for_label(encoding.encoding.as_bytes())
             .unwrap_or(UTF_8)
             .decode(&content);
-            
+
         if had_errors {
-            println!("Warning: Some characters couldn't be decoded in file: {:?}", path);
+            println!(
+                "Warning: Some characters couldn't be decoded in file: {:?}",
+                path
+            );
         }
 
         let content = content.into_owned();
@@ -367,10 +377,16 @@ impl DocumentManager {
             size: metadata.len(),
             is_directory: metadata.is_dir(),
             is_symlink: metadata.file_type().is_symlink(),
-            created_at: metadata.created().ok().and_then(|t| 
-                t.duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs())),
-            modified_at: metadata.modified().ok().and_then(|t| 
-                t.duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs())),
+            created_at: metadata.created().ok().and_then(|t| {
+                t.duration_since(std::time::UNIX_EPOCH)
+                    .ok()
+                    .map(|d| d.as_secs())
+            }),
+            modified_at: metadata.modified().ok().and_then(|t| {
+                t.duration_since(std::time::UNIX_EPOCH)
+                    .ok()
+                    .map(|d| d.as_secs())
+            }),
             readonly: metadata.permissions().readonly(),
             file_type,
             encoding,
@@ -379,7 +395,8 @@ impl DocumentManager {
 
         // Cache if size is within limit
         if metadata.len() <= CACHE_SIZE_LIMIT {
-            self.cache_content(path.clone(), content.clone(), doc_metadata.clone()).await?;
+            self.cache_content(path.clone(), content.clone(), doc_metadata.clone())
+                .await?;
         }
 
         Ok(content)
@@ -398,16 +415,20 @@ impl DocumentManager {
                     .await
                     .with_context(|| format!("Failed to read metadata for file: {:?}", path))?;
 
-                document_states.insert(path.clone(), DocumentState {
-                    version: 0,
-                    is_open: true,
-                    last_modification: metadata.modified()
-                        .ok()
-                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                        .map(|d| d.as_secs())
-                        .unwrap_or(0),
-                    is_dirty: false,
-                });
+                document_states.insert(
+                    path.clone(),
+                    DocumentState {
+                        version: 0,
+                        is_open: true,
+                        last_modification: metadata
+                            .modified()
+                            .ok()
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0),
+                        is_dirty: false,
+                    },
+                );
                 0
             }
         };
@@ -428,11 +449,13 @@ impl DocumentManager {
                     size: fs_metadata.len(),
                     is_directory: fs_metadata.is_dir(),
                     is_symlink: fs_metadata.file_type().is_symlink(),
-                    created_at: fs_metadata.created()
+                    created_at: fs_metadata
+                        .created()
                         .ok()
                         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                         .map(|d| d.as_secs()),
-                    modified_at: fs_metadata.modified()
+                    modified_at: fs_metadata
+                        .modified()
                         .ok()
                         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                         .map(|d| d.as_secs()),
@@ -455,7 +478,7 @@ impl DocumentManager {
         &self,
         path: PathBuf,
         content: String,
-        metadata: DocumentMetadata
+        metadata: DocumentMetadata,
     ) -> Result<()> {
         let mut cache = self.cache.write().await;
         let mut cache_queue = self.cache_queue.write().await;
@@ -473,12 +496,15 @@ impl DocumentManager {
         }
 
         // Add new entry
-        cache.insert(path.clone(), CacheEntry {
-            content,
-            metadata,
-            last_accessed: std::time::Instant::now(),
-        });
-        
+        cache.insert(
+            path.clone(),
+            CacheEntry {
+                content,
+                metadata,
+                last_accessed: std::time::Instant::now(),
+            },
+        );
+
         cache_queue.push_back(path);
         Ok(())
     }
@@ -493,7 +519,104 @@ impl DocumentManager {
 
     pub async fn get_document_state(&self, path: &PathBuf) -> Result<DocumentState> {
         let states = self.document_states.read().await;
-        states.get(path).cloned().ok_or_else(|| anyhow::anyhow!("Document state not found"))
+        states
+            .get(path)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Document state not found"))
     }
 
+    pub async fn create_file(&self, path: &PathBuf, is_directory: bool) -> Result<()> {
+        // Ensure path is within workspace
+        println!("Path: {:?}", path);
+        if !path.starts_with(&self.workspace_path) {
+            bail!("Path is outside of workspace");
+        }
+
+        // Check if file already exists
+        if path.exists() {
+            bail!("File or directory already exists");
+        }
+
+        if is_directory {
+            tokio::fs::create_dir_all(path).await?;
+        } else {
+            // Create parent directories if they don't exist
+            if let Some(parent) = path.parent() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+            tokio::fs::File::create(path).await?;
+        }
+
+        Ok(())
+    }
+
+    pub async fn delete_file(&self, path: &PathBuf) -> Result<()> {
+        // Ensure path is within workspace
+        if !path.starts_with(&self.workspace_path) {
+            bail!("Path is outside of workspace");
+        }
+
+        // Check if file exists
+        if !path.exists() {
+            bail!("File or directory does not exist");
+        }
+
+        // Close file if it's open
+        if let Some(state) = self.document_states.write().await.remove(path) {
+            if state.is_dirty {
+                bail!("File has unsaved changes");
+            }
+        }
+
+        // Remove from cache if present
+        // self.invalidate_cache_for_file(path).await;
+
+        // Delete the file or directory
+        if path.is_dir() {
+            tokio::fs::remove_dir_all(path).await?;
+        } else {
+            tokio::fs::remove_file(path).await?;
+        }
+
+        Ok(())
+    }
+
+    pub async fn rename_file(&self, old_path: &PathBuf, new_path: &PathBuf) -> Result<()> {
+        // Ensure both paths are within workspace
+        if !old_path.starts_with(&self.workspace_path)
+            || !new_path.starts_with(&self.workspace_path)
+        {
+            bail!("Path is outside of workspace");
+        }
+
+        // Check if source exists and destination doesn't
+        if !old_path.exists() {
+            bail!("Source file does not exist");
+        }
+        if new_path.exists() {
+            bail!("Destination already exists");
+        }
+
+        // Create parent directories if they don't exist
+        if let Some(parent) = new_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+
+        // If file is open, update its state
+        let mut states = self.document_states.write().await;
+        if let Some(state) = states.remove(old_path) {
+            states.insert(new_path.clone(), state);
+        }
+
+        // Update cache if present
+        let mut cache = self.cache.write().await;
+        if let Some(entry) = cache.remove(old_path) {
+            cache.insert(new_path.clone(), entry);
+        }
+
+        // Perform the rename
+        tokio::fs::rename(old_path, new_path).await?;
+
+        Ok(())
+    }
 }
