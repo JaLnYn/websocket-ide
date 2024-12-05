@@ -170,7 +170,7 @@ impl DocumentManager {
         doc: &VersionedDocument,
         changes: Vec<DiffChange>,
     ) -> Result<VersionedDocument> {
-        let path = &doc.uri;
+        let path = &doc.uri.canonicalize()?;
         let mut states = self.document_states.write().await;
 
         if let Some(state) = states.get_mut(path) {
