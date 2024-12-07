@@ -2,8 +2,8 @@
 
 A lightweight code server that lets you build custom websocket-based IDEs. Built with Rust for speed and reliability. Perfect for web-based coding environments, self-hosted solutions, or custom IDE implementations.
 
-An example browser IDE is right here: [🍌 JaLnYn/browser-ide](https://github.com/JaLnYn/browser-ide) (It's ugly. Sorry!)
-<img width="1488" alt="image" src="https://github.com/user-attachments/assets/26a01a96-0d15-4d61-8799-12e0e0254663">
+An example browser IDE is right here: [🍌 JaLnYn/browser-ide](https://github.com/JaLnYn/browser-ide)
+![design](https://github.com/user-attachments/assets/004de091-e4c0-40fa-8101-96ceea281f49)
 
 
 ## Features
@@ -32,7 +32,7 @@ npm i
 npm run dev
 ```
 
-Note: if you want to test the lsp, you have to install rust-analyzer. Instructions [HERE](https://rust-analyzer.github.io/manual.html#rust-analyzer-language-server-binary)
+Note: if you want to test the lsp, you have to install rust-analyzer or it may error. Instructions [HERE](https://rust-analyzer.github.io/manual.html#rust-analyzer-language-server-binary)
 
 ```
 # snippet from the site
@@ -54,15 +54,18 @@ chmod +x ~/.local/bin/rust-analyzer
 | `RefreshDirectory` | `{ path: string }`                                                  | Force refreshes directory contents, clearing cache.                                                   |
 | `ChangeFile`       | `{ document: { uri: string, version: number }, changes: Change[] }` | Applies changes to file content. Validates document version.                                          |
 | `SaveFile`         | `{ document: { uri: string, version: number } }`                    | Saves current file content to disk.                                                                   |
+| `CreateFile`       | `{ path: string, is_directory: boolean }`                           | Creates a new file or directory at the specified path.                                                |
+| `DeleteFile`       | `{ path: string }`                                                  | Deletes the file or directory at the specified path.                                                  |
+| `RenameFile`       | `{ old_path: string, new_path: string }`                           | Renames/moves a file or directory from old_path to new_path.                                         |
 | `Completion`       | `{ path: string, position: Position }`                              | Requests code completions at position.                                                                |
-| `Hover`            | `{ path: string, position: Position }`                              | Requests hover information at position.                                                               |
+| `Hover`           | `{ path: string, position: Position }`                              | Requests hover information at position.                                                               |
 | `Definition`       | `{ path: string, position: Position }`                              | Requests go-to-definition locations.                                                                  |
-| `CreateTerminal`   | `{ cols: number, rows: number }`                                    | Creates a new terminal instance with specified dimensions                                             |
-| `ResizeTerminal`   | `{ id: string, cols: number, rows: number }`                        | Resizes an existing terminal                                                                          |
-| `WriteTerminal`    | `{ id: string, data: number[] }`                                    | Sends input data to terminal                                                                          |
-| `CloseTerminal`    | `{ id: string }`                                                    | Closes a terminal instance                                                                            |
-| `Search`           | `{ query: string, search_content: boolean }`                        | Initiates a search with optional content searching                                                    |
-| `CancelSearch`     | `{}`                                                                |
+| `CreateTerminal`   | `{ cols: number, rows: number }`                                    | Creates a new terminal instance with specified dimensions.                                            |
+| `ResizeTerminal`   | `{ id: string, cols: number, rows: number }`                        | Resizes an existing terminal.                                                                         |
+| `WriteTerminal`    | `{ id: string, data: number[] }`                                    | Sends input data to terminal.                                                                         |
+| `CloseTerminal`    | `{ id: string }`                                                    | Closes a terminal instance.                                                                           |
+| `Search`           | `{ query: string, search_content: boolean }`                        | Initiates a search with optional content searching.                                                   |
+| `CancelSearch`     | `{}`                                                                | Cancels an ongoing search operation.                                                                  |
 
 ### Server Messages
 
@@ -82,7 +85,7 @@ chmod +x ~/.local/bin/rust-analyzer
 | `TerminalOutput`     | `{ terminal_id: string, data: number[] }`                                        | Terminal output data          |
 | `TerminalClosed`     | `{ id: string }`                                                                 | Confirms terminal closure     |
 | `TerminalError`      | `{ terminal_id: string, error: string }`                                         | Terminal error details        |
-| `SearchResults`      | `{ search_id: string, items: SearchResultItem[], is_complete: boolean }`         | Search results batch.         |
+| `SearchResults`      | `{ search_id: string, items: SearchResultItem[], is_complete: boolean }`         | Search results batch          |
 
 ## Todo
 
