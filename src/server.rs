@@ -177,7 +177,6 @@ pub struct Server {
     search_manager: Arc<SearchManager>,
 }
 
-
 impl Server {
     pub fn new(workspace_path: PathBuf, port: u16) -> Result<Self> {
         // canonicalize workspace path
@@ -202,7 +201,6 @@ impl Server {
         let lsp_manager = Arc::new(LspManager::new(new_path, lsp_configs));
         let terminal_manager = Arc::new(TerminalManager::new());
         let search_manager = SearchManager::new(workspace_path.clone());
-
 
         let terminal_manager = Arc::new(TerminalManager::new());
         let search_manager = SearchManager::new(workspace_path.clone());
@@ -369,7 +367,6 @@ impl Server {
             }
 
             ClientMessage::ChangeFile { document, changes } => {
-
                 let path = match canonicalize_document_path(
                     self.file_system.get_workspace_path(),
                     &document,
@@ -432,7 +429,6 @@ impl Server {
             }
 
             ClientMessage::SaveFile { document } => {
-
                 let path = match canonicalize_document_path(
                     self.file_system.get_workspace_path(),
                     &document,
@@ -504,7 +500,6 @@ impl Server {
 
             ClientMessage::Hover { path, position } => {
                 println!("Received hover request: {:?}", path);
-
 
                 match get_full_path(self.file_system.get_workspace_path(), &path) {
                     Ok(full_path) => match self.lsp_manager.get_hover(&full_path, position).await {
@@ -634,7 +629,6 @@ impl Server {
                         message: format!("Invalid path: {}", e),
                     },
                 }
-
             }
 
             ClientMessage::RenameFile { old_path, new_path } => {
